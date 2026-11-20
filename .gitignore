@@ -1,0 +1,14 @@
+# The built binary.
+/non
+
+# Sample PDFs: local test fixtures, not content. The extraction tests skip when
+# they are absent, so a fresh clone still builds and tests clean.
+/samples/*.pdf
+
+# A collection created by running non in the repository itself.
+/.non.json
+
+# Editor and OS clutter.
+*.swp
+*~
+.DS_Store
