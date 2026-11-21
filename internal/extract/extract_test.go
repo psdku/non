@@ -143,7 +143,7 @@ func TestTitleRejectsBodyText(t *testing.T) {
 	// Uniform type sizes: there is no title, so extraction must say so rather
 	// than return the first line of the body.
 	var lines []line
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		lines = append(lines, line{y: float64(700 - i*12), size: 10, text: "body text line here"})
 	}
 	if got := titleFromLines(lines); got != "" {

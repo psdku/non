@@ -15,7 +15,7 @@ func settingsWithList(t *testing.T, page setPage, n int) *Model {
 	c := &m.lib.Store.Config
 	c.Tools = nil
 	c.TagTable = nil
-	for i := 0; i < n; i++ {
+	for i := range n {
 		name := fmt.Sprintf("item%02d", i)
 		if page == pageTags {
 			c.TagTable = append(c.TagTable, meta.Tag{Name: name, Description: "a tag"})
@@ -72,7 +72,7 @@ func TestModalListShowsManyRows(t *testing.T) {
 		// Every item must be on screen.
 		out := stripEsc(m.View())
 		missing := 0
-		for i := 0; i < 10; i++ {
+		for i := range 10 {
 			if !strings.Contains(out, fmt.Sprintf("item%02d", i)) {
 				missing++
 			}
@@ -140,7 +140,7 @@ func TestModalListScrollsToEnd(t *testing.T) {
 	m := settingsWithList(t, pageTags, 40)
 	m.width, m.height = 100, 24
 	// Walk to the last tag with the model's own key handling.
-	for i := 0; i < 39; i++ {
+	for range 39 {
 		m = key(m, "j")
 	}
 	if m.settings.cursor != 39 {

@@ -15,6 +15,11 @@ func queryLib(t *testing.T) *Library {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Every tag a paper uses must be in the table, or it is invisible to both
+	// the display and the filter.
+	for _, tag := range []string{"attention", "LLM", "DB"} {
+		lib.Store.Config.SetTag(-1, meta.Tag{Name: tag})
+	}
 	lib.Store.Set("attention.pdf", &meta.Entry{
 		Title: "Attention Is All You Need", Author: "Vaswani",
 		Tags: []string{"attention", "LLM"},
@@ -133,7 +138,7 @@ func TestQueryOrderIsStable(t *testing.T) {
 	lib := queryLib(t)
 	tags := Query{Tags: mustParse(t, "LLM")}
 	first := selectedNames(lib, tags.Select(lib))
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		again := selectedNames(lib, tags.Select(lib))
 		for j := range first {
 			if first[j] != again[j] {

@@ -65,10 +65,7 @@ func (m *Model) viewBrowser() string {
 // gets the larger share (yazi's ratio is 4 list : 3 preview), unless the
 // terminal is narrow enough that the details pane would be unusable.
 func (m *Model) leftWidth(w int) int {
-	l := w * 4 / 7
-	if l < minListWidth {
-		l = minListWidth
-	}
+	l := max(w*4/7, minListWidth)
 	if w-l < minInfoWidth {
 		l = w - minInfoWidth
 	}
@@ -171,8 +168,10 @@ func (m *Model) viewFooter(w int) string {
 	if m.status == "" && m.filterActive() {
 		blocks = append(blocks, stAccent.Render(fmt.Sprintf("filter %d/%d", len(m.visible), len(m.all))))
 	}
-	if p := m.current(); p != nil && p.Meta != nil && len(p.Meta.Tags) > 0 {
-		blocks = append(blocks, stTag.Render(tagSummary(p.Meta.Tags)))
+	if p := m.current(); p != nil {
+		if valid := m.lib.DisplayTags(p); len(valid) > 0 {
+			blocks = append(blocks, stTag.Render(tagSummary(valid)))
+		}
 	}
 
 	left := strings.Join(blocks, stFaint.Render("  "))
@@ -247,10 +246,7 @@ func (m *Model) viewList(w, h int) string {
 		}
 	}
 	if m.mode == modeRename {
-		at := m.cursor - m.offset + 1
-		if at < 0 {
-			at = 0
-		}
+		at := max(m.cursor-m.offset+1, 0)
 		if at >= innerH {
 			at = innerH - 1
 		}
@@ -302,14 +298,48 @@ const maxRowTags = 3
 // tagSummary renders tags for a single-line display: the first three, with a
 // "+" on the last when there are more. It is deliberately not a count — the
 // list is for scanning, and the details pane has the full list.
+//
+// Every name is quoted when it has to be. Without that, "a b" would be
+// indistinguishable from the two tags "a" and "b", which is exactly what the
+// unquoted form means in a query.
 func tagSummary(tags []string) string {
 	switch {
 	case len(tags) == 0:
 		return ""
 	case len(tags) <= maxRowTags:
-		return strings.Join(tags, " ")
+		return joinTagNames(tags)
 	}
-	return strings.Join(tags[:maxRowTags], " ") + "+"
+	return joinTagNames(tags[:maxRowTags]) + "+"
+}
+
+// joinTagNames quotes the names that need it and joins them with a space.
+func joinTagNames(tags []string) string {
+	out := make([]string, len(tags))
+	for i, t := range tags {
+		out[i] = meta.QuoteTagName(t)
+	}
+	return strings.Join(out, " ")
+}
+
+// rowTagsFor is the tags a list row shows. Normally that is the displayable set:
+// a tag the table cannot use is hidden, because it is a problem to fix rather
+// than a property of the paper.
+//
+// The exception is a filtered view: when the query that produced the rows matched
+// on such a tag, hiding it would leave the user looking at a paper that seems to
+// match nothing. Those tags are shown, in red, so the row explains itself.
+func (m *Model) rowTagsFor(p *app.Paper) (shown, problem []string) {
+	shown = m.lib.DisplayTags(p)
+	if !m.filterActive() || p.Meta == nil {
+		return shown, nil
+	}
+	bad := m.lib.Store.ProblemTagsFor(p.Name)
+	for _, t := range p.Meta.Tags {
+		if bad[strings.ToLower(t)] {
+			problem = append(problem, t)
+		}
+	}
+	return shown, problem
 }
 
 // listRow renders one file: the name on the left, its tags flush right.
@@ -322,17 +352,13 @@ func (m *Model) listRow(i, w int) string {
 	p := m.all[m.visible[i]]
 	cur := i == m.cursor
 
-	tags := ""
-	if p.Meta != nil {
-		tags = tagSummary(p.Meta.Tags)
-	}
+	shown, problem := m.rowTagsFor(p)
 
-	room := w - 2 // one cell of padding on each side
-	if room < 4 {
-		room = 4
-	}
+	// one cell of padding on each side
+	room := max(w-2, 4)
 	// Tags are the only thing that may be dropped, and only when there is no
 	// room for both; the name always wins, because it identifies the row.
+	tags := tagSummary(shown)
 	tagW := 0
 	if tags != "" {
 		tagW = lipgloss.Width(tags)
@@ -342,18 +368,45 @@ func (m *Model) listRow(i, w int) string {
 		tags = app.Truncate(tags, tagW)
 		tagW = lipgloss.Width(tags)
 	}
-	name := app.Truncate(p.Name, maxInt(room-tagW-1, 4))
-	gap := room - lipgloss.Width(name) - tagW
-	if gap < 1 {
-		gap = 1
+	// A problem tag is only shown on a filtered row (see rowTagsFor), and then
+	// it is the reason the row is there, so it goes before the regular tags: a
+	// truncated row must still explain the match.
+	bad := tagSummary(problem)
+	badW := 0
+	if bad != "" {
+		badW = lipgloss.Width(bad)
+		if badW > room/2 {
+			badW = maxInt(room/2, 1)
+		}
+		bad = app.Truncate(bad, badW)
+		badW = lipgloss.Width(bad)
+		if tags != "" {
+			badW++ // the space between the two groups
+		}
 	}
+	name := app.Truncate(p.Name, maxInt(room-tagW-badW-1, 4))
+	gap := max(room-lipgloss.Width(name)-tagW-badW, 1)
 
 	if cur {
-		// One reverse bar for the whole row: no coloured text inside, because
-		// a foreground colour would fight the reversed background.
-		return stCursor.Render(fit(" "+name+strings.Repeat(" ", gap)+tags, w))
+		// One reverse bar for the whole row: no foreground colour inside, because
+		// it would fight the reversed background. The reverse bar is what marks
+		// the cursor, so a problem tag inside it is styled by position instead:
+		// it comes first, and is the only one that can be there.
+		text := " " + name + strings.Repeat(" ", gap) + bad
+		if len(problem) > 0 && tags != "" && badW > 0 {
+			text += " "
+		}
+		return stCursor.Render(fit(text+tags, w))
 	}
 	out := stFaint.Render(" " + name + strings.Repeat(" ", gap))
+	if badW > 0 {
+		if bad != "" {
+			out += stErr.Render(bad)
+		}
+		if tags != "" {
+			out += " "
+		}
+	}
 	if tagW > 0 {
 		out += stTag.Render(tags)
 	}
@@ -416,11 +469,11 @@ func menuRows(label string, width, n, cur int, entry func(i int) (name, key stri
 
 	head := " " + label + " "
 	if lipgloss.Width(head) < width-1 {
-		head += strings.Repeat("─", width-1-lipgloss.Width(head))
+		head += strings.Repeat("─", width-2-lipgloss.Width(head))
 	}
 	out = append(out, rule("╭")+stDim.Render(app.Truncate(head, width-1))+rule("╮"))
 
-	for i := 0; i < n; i++ {
+	for i := range n {
 		name, key := entry(i)
 		keyW := lipgloss.Width(key)
 		// width-2 for the side rules, 1 of left margin, 1 of gap before the key.
@@ -484,8 +537,12 @@ func (m *Model) viewInfo(w, h int) string {
 	if e.Title == "" {
 		wrapInto(stErr.Render("title missing — press m"))
 	}
-	if len(e.Tags) > 0 {
-		wrapInto(stTag.Render("#" + strings.Join(e.Tags, " #")))
+	if valid := m.lib.DisplayTags(p); len(valid) > 0 {
+		wrapInto(stTag.Render("#" + strings.Join(valid, " #")))
+	} else if len(e.Tags) > 0 {
+		// Everything on this paper is unknown: say so instead of showing
+		// nothing, or the empty line would look like an untagged paper.
+		wrapInto(stErr.Render("tags not in the tag table — press m"))
 	}
 
 	if e.Comment != "" {
@@ -1120,10 +1177,7 @@ func (m *Model) viewConfirm() string {
 	}
 	body = append(body, buttonRow)
 
-	boxH := len(body) + 2
-	if boxH > m.height {
-		boxH = m.height
-	}
+	boxH := min(len(body)+2, m.height)
 	box := panel(c.title, strings.Join(body, "\n"), boxW, boxH, true)
 	return overlayCard(box, dimScreen(m.viewBrowser()), m.width, m.height)
 }

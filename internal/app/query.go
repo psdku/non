@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"non/internal/filter"
+	"non/internal/meta"
 	"non/internal/search"
 )
 
@@ -39,7 +40,7 @@ func (q Query) Select(lib *Library) []int {
 	if q.Tags != nil {
 		kept := make([]*Paper, 0, len(all))
 		for _, p := range all {
-			if PaperHasTags(p, q.Tags) {
+			if PaperHasTags(lib, p, q.Tags) {
 				kept = append(kept, p)
 			}
 		}
@@ -79,14 +80,10 @@ func (q Query) Select(lib *Library) []int {
 	return search.OrderOf(text, docs, positions, q.WithMeta)
 }
 
-// PaperHasTags evaluates a tag expression against one paper.
-func PaperHasTags(p *Paper, node filter.Node) bool {
+// HasTags evaluates a tag expression against one paper's tag list.
+func HasTags(tags []string, node filter.Node) bool {
 	if node == nil {
 		return true
-	}
-	var tags []string
-	if p.Meta != nil {
-		tags = p.Meta.Tags
 	}
 	return node.Eval(func(name string) bool {
 		for _, t := range tags {
@@ -96,6 +93,58 @@ func PaperHasTags(p *Paper, node filter.Node) bool {
 		}
 		return false
 	})
+}
+
+// MatchTags is the tag list a query is evaluated against: everything the entry
+// carries, including tags whose name would need quoting and tags the table does
+// not know.
+//
+// That is deliberately wider than DisplayTags. Hiding an unusable tag from the
+// display is a way of saying "fix this"; hiding it from the query language as
+// well would leave the user unable to find the paper at all until they had
+// repaired the file, and quoting a name is an explicit act -- nobody types
+// "KV cache" by accident.
+func (l *Library) MatchTags(p *Paper) []string {
+	if p == nil || p.Meta == nil {
+		return nil
+	}
+	return append([]string(nil), p.Meta.Tags...)
+}
+
+// PaperHasTags evaluates a tag expression against the tags a paper carries.
+func PaperHasTags(lib *Library, p *Paper, node filter.Node) bool {
+	return HasTags(lib.MatchTags(p), node)
+}
+
+// DisplayTags is the tag list a paper shows: the ones the tag table knows, in
+// its spelling.
+//
+// A tag the table does not know is excluded, because it is a problem to fix
+// rather than a property of the paper. A known tag is always shown, even when its
+// name is untidy: a rule is not a reason to hide the user's own data.
+func (l *Library) DisplayTags(p *Paper) []string {
+	return validTagList(p, func(name string) bool {
+		_, ok := l.Store.Config.Tag(name)
+		return ok
+	})
+}
+
+// validTagList filters a paper's tags through known, deduplicated.
+func validTagList(p *Paper, known func(string) bool) []string {
+	if p == nil || p.Meta == nil {
+		return nil
+	}
+	out := make([]string, 0, len(p.Meta.Tags))
+	for _, t := range p.Meta.Tags {
+		// The gate is "is it usable", not "was it written under the current
+		// rule": a known name with an untidy character can still be displayed
+		// and matched, so it is kept.
+		if !known(t) || meta.CriticalTagName(t) {
+			continue
+		}
+		out = append(out, t)
+	}
+	return out
 }
 
 // HasTag reports whether a paper carries a tag, ignoring case.

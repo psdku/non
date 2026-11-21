@@ -25,6 +25,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"sort"
@@ -68,9 +69,7 @@ type Store struct {
 // MarshalJSON encodes the store, merging unknown top level keys.
 func (s Store) MarshalJSON() ([]byte, error) {
 	m := make(map[string]json.RawMessage, len(s.Fields)+3)
-	for k, v := range s.Fields {
-		m[k] = v
-	}
+	maps.Copy(m, s.Fields)
 	version, err := json.Marshal(s.Version)
 	if err != nil {
 		return nil, err
@@ -164,6 +163,10 @@ func Load(dir string) (*Store, error) {
 	// A legacy flat "config" map (or an "opener" key) is folded into the
 	// structured config here, so callers only ever see the current shape.
 	s.Config.migrate()
+	// Repair what can be repaired without losing information: duplicate tag
+	// rows, and entry tags that differ only in case. Unknown tags are left for
+	// Store.Problems to report, because deleting one would lose intent.
+	s.Normalize()
 	// The schema version decides whether the document can be used at all; a
 	// file from a newer build is refused rather than rewritten.
 	if err := s.migrate(); err != nil {
@@ -197,6 +200,11 @@ func (s *Store) Save() error {
 	if s.path == "" {
 		return errors.New("store has no path")
 	}
+	// Canonicalise on the way out too: a caller that built an entry by hand
+	// still gets one spelling per tag, and a table that was hand-edited into
+	// duplicates is merged by the first write.
+	s.Config.canonicalizeTable()
+	s.canonicalizeTags()
 	// Refuse to write a document this build does not understand, even if the
 	// caller constructed the store by hand.
 	if err := s.migrate(); err != nil {
@@ -428,7 +436,7 @@ func NormalizeTags(tags []string) []string {
 	var out []string
 	seen := map[string]bool{}
 	for _, t := range tags {
-		for _, part := range strings.Split(t, ",") {
+		for part := range strings.SplitSeq(t, ",") {
 			p := strings.TrimSpace(part)
 			if p == "" {
 				continue

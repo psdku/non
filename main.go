@@ -26,7 +26,7 @@ import (
 	"non/internal/tui"
 )
 
-var version = "0.6.2"
+var version = "0.7.0"
 
 // stringList collects a repeatable string flag.
 type stringList []string
@@ -60,6 +60,7 @@ func run() error {
 		setDir   = flag.String("set-dir", "", "set the default directory in the user config")
 		unsetDir = flag.Bool("unset-dir", false, "clear the default directory")
 		showDef  = flag.Bool("default-dir", false, "print the default directory and exit")
+		check    = flag.Bool("check", false, "report problems in "+meta.StoreFile+" and exit")
 		queryF   = flag.String("query", "", "print the papers matching this text query, then exit")
 		tagsF    = flag.String("tags", "", "with --query/--list, keep only papers matching this tag expression")
 		paths    = flag.Bool("paths", false, "with --query, print full paths instead of a table")
@@ -118,6 +119,13 @@ func run() error {
 	if err := applyToolFlags(lib, *opener, tools); err != nil {
 		return err
 	}
+	// Tell the user about tags the table does not know, whatever the mode: the
+	// TUI shows it in its status bar, and a script still deserves it on stderr.
+	// It is not fatal, because the file is intact and fixable.
+	if !*check {
+		warnUnknownTags(lib)
+	}
+
 	// "Was the flag given?" is not the same as "is its value non-empty": an
 	// empty --query is a legitimate way to ask for the tagged papers in
 	// library order, so the flags are detected by presence.
@@ -144,6 +152,9 @@ func run() error {
 	}
 	// --list and --query print the same records; --list adds the abstract.
 	// Both honour --tags, so `--list --tags LLM` lists exactly the LLM papers.
+	if *check {
+		return runCheck(lib)
+	}
 	if *list {
 		return printLibrary(lib, q, *noWrite)
 	}
@@ -151,7 +162,7 @@ func run() error {
 		return printQuery(lib, q, *paths, *count, *noWrite)
 	}
 
-	m, err := tui.Open(lib.Dir)
+	m, err := tui.New(lib)
 	if err != nil {
 		return err
 	}
@@ -247,8 +258,10 @@ func printLibrary(lib *app.Library, q app.Query, noWrite bool) error {
 		if e.Author != "" {
 			fmt.Printf("\t%s", e.Author)
 		}
-		if len(e.Tags) > 0 {
-			fmt.Printf("\t%s", strings.Join(e.Tags, ","))
+		// Only tags the table knows: an unknown one is a problem to fix, not a
+		// property of the paper, and stdout is for what the collection says.
+		if valid := lib.DisplayTags(p); len(valid) > 0 {
+			fmt.Printf("\t%s", strings.Join(valid, ","))
 		}
 		if e.Abstract != "" {
 			a := strings.ReplaceAll(e.Abstract, "\n", " ")
@@ -529,4 +542,58 @@ func isBoolFlag(name string) bool {
 	}
 	b, ok := f.Value.(interface{ IsBoolFlag() bool })
 	return ok && b.IsBoolFlag()
+}
+
+// warnUnknownTags reports tags used by a paper but missing from the tag table.
+// Such a tag is hidden from every display and must be resolved by the user; the
+// warning is on stderr so a pipeline's stdout stays clean.
+func warnUnknownTags(lib *app.Library) {
+	if bad := lib.Store.BlockingTags(); len(bad) > 0 {
+		fmt.Fprintf(os.Stderr, "non: warning: %d unusable tag(s): %s\n",
+			len(bad), strings.Join(bad, ", "))
+		fmt.Fprintf(os.Stderr, "     fix them with the metadata editor (m), or add them in settings (s)\n")
+	}
+}
+
+// runCheck reports problems in the store and sets the exit status.
+//
+// It exists because the store may be edited by other tools, and a script that
+// generates metadata wants to know whether it produced something non is happy
+// to use. Nothing is written: --check never repairs, so it is safe to run at any
+// time and its exit status means exactly "is this collection consistent".
+func runCheck(lib *app.Library) error {
+	problems := lib.Store.Problems()
+	if len(problems) == 0 {
+		fmt.Printf("%s: ok, %d paper(s)\n", lib.Store.Path(), len(lib.Papers))
+		return nil
+	}
+
+	// A critical problem stops a query from naming the tag at all; everything
+	// else is untidiness that non tolerates, so it is reported and the exit
+	// status stays 0. That distinction is what makes --check usable in a commit
+	// hook: it fails on what is broken, not on what is merely odd.
+	// Three outcomes, not two. An untidy name that the table does know is
+	// reported but tolerated: it is displayable, filterable and saveable, so
+	// failing on it would make --check useless in a hook. Everything else
+	// blocks: a tag the table cannot resolve, or a name that would need quoting
+	// every time it is queried.
+	fatal := 0
+	fmt.Printf("%s: %d problem(s)\n", lib.Store.Path(), len(problems))
+	for _, p := range problems {
+		_, known := lib.Store.Config.Tag(p.Tag)
+		switch {
+		case p.Critical:
+			fatal++
+			fmt.Printf("  %s: tag %q cannot be used in a query — quote it or rename it\n", p.Entry, p.Tag)
+		case !known:
+			fatal++
+			fmt.Printf("  %s: tag %q is not in the tag table\n", p.Entry, p.Tag)
+		default:
+			fmt.Printf("  %s: tag %q has a character that is not allowed (tolerated)\n", p.Entry, p.Tag)
+		}
+	}
+	if fatal == 0 {
+		return nil
+	}
+	return fmt.Errorf("%d tag problem(s) found", fatal)
 }

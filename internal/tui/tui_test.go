@@ -164,6 +164,7 @@ func TestSearchEnterKeepsQuery(t *testing.T) {
 
 func TestViewRenders(t *testing.T) {
 	m := newTestModel(t, "attention.pdf", "gpt3.pdf")
+	m.lib.Store.Config.SetTag(-1, meta.Tag{Name: "transformer"})
 	m.lib.Store.Set("attention.pdf", &meta.Entry{
 		Title: "Attention Is All You Need", Author: "Vaswani", Tags: []string{"transformer"},
 		Abstract: "The dominant sequence transduction models.",
@@ -270,6 +271,10 @@ func TestDetailsScroll(t *testing.T) {
 
 func TestEditorRoundTrip(t *testing.T) {
 	m := newTestModel(t, "a.pdf")
+	// The tags the editor writes must exist in the table, or the save is
+	// refused (see applyEditor).
+	m.lib.Store.Config.SetTag(-1, meta.Tag{Name: "one"})
+	m.lib.Store.Config.SetTag(-1, meta.Tag{Name: "two"})
 	// Simulate what $EDITOR would leave behind.
 	path := filepath.Join(t.TempDir(), "meta.md")
 	src := "# Edited Title\n- Author: Someone\n- Tags: one, two\n\n# Comment\nhello\n"
@@ -447,5 +452,40 @@ func TestReextractFillsAutomaticEntry(t *testing.T) {
 	e, _ := m.lib.Store.Lookup("stub.pdf")
 	if e.Title != "stub" {
 		t.Errorf("Title = %q, want the file name fallback", e.Title)
+	}
+}
+
+// The TUI must see the tools and tags inherited from the user configuration:
+// reopening the library from a path instead of using the loaded one silently
+// dropped them.
+func TestNewInheritsGlobalConfig(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.pdf"), []byte("%PDF-1.4\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g := &meta.GlobalConfig{
+		Tools:    []meta.Tool{{Name: "zathura", Command: "zathura", Type: meta.ToolGUI}},
+		TagTable: []meta.Tag{{Name: "inherited", Description: "from the user config"}},
+	}
+	lib, err := app.OpenDirWith(dir, g)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := New(lib)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := m.defaultTool(); !ok {
+		t.Error("the inherited tool is missing")
+	}
+	if _, ok := m.lib.Store.Config.Tag("inherited"); !ok {
+		t.Error("the inherited tag table is missing")
+	}
+	// And the settings modal shows them, rather than an empty list.
+	m.openSettings()
+	m.settings.page = pageTags
+	m.refreshTags()
+	if len(m.settings.tags) != 1 {
+		t.Errorf("settings shows %d tags, want the inherited one", len(m.settings.tags))
 	}
 }

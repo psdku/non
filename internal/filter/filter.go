@@ -237,33 +237,37 @@ func lex(s string) ([]token, error) {
 	i := 0
 	for i < len(s) {
 		c := s[i]
-		switch {
-		case c == ' ' || c == '\t' || c == '\n':
+		switch c {
+		case ' ', '\t', '\n':
 			i++
-		case c == '&':
+		case '&':
+			// "&&" is the AND operator; a lone "&" is an ordinary character, so
+			// a tag like "R&D" needs no quoting.
 			if i+1 < len(s) && s[i+1] == '&' {
 				toks = append(toks, token{tokAnd, "&&", i})
 				i += 2
 				continue
 			}
-			return nil, &ParseError{Msg: `stray "&", use "&&"`, Pos: i}
-		case c == '|':
+			text, next := lexWord(s, i)
+			toks = append(toks, token{tokTag, text, i})
+			i = next
+		case '|':
 			if i+1 < len(s) && s[i+1] == '|' {
 				toks = append(toks, token{tokOr, "||", i})
 				i += 2
 				continue
 			}
 			return nil, &ParseError{Msg: `stray "|", use "||"`, Pos: i}
-		case c == '!':
+		case '!':
 			toks = append(toks, token{tokNot, "!", i})
 			i++
-		case c == '(':
+		case '(':
 			toks = append(toks, token{tokOpen, "(", i})
 			i++
-		case c == ')':
+		case ')':
 			toks = append(toks, token{tokClose, ")", i})
 			i++
-		case c == '"' || c == '\'':
+		case '"', '\'':
 			text, next, err := lexQuoted(s, i)
 			if err != nil {
 				return nil, err
@@ -326,9 +330,17 @@ func lexWord(s string, i int) (string, int) {
 	j := i
 	for j < len(s) {
 		c := s[j]
-		if c == ' ' || c == '\t' || c == '\n' || c == '(' || c == ')' ||
-			c == '&' || c == '|' {
+		if c == ' ' || c == '\t' || c == '\n' || c == '(' || c == ')' || c == '|' {
 			break
+		}
+		if c == '&' {
+			// A pair starts the AND operator; a lone one belongs to the name.
+			if j+1 < len(s) && s[j+1] == '&' {
+				break
+			}
+			b.WriteByte(c)
+			j++
+			continue
 		}
 		if c == '!' && j > i {
 			// "a!b" is unusual; stop so the "!" starts a negation and the

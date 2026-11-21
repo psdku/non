@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textarea"
@@ -49,9 +51,27 @@ type metaForm struct {
 	cur   int
 	focus int // index of the focused input/textarea, -1 for none
 
-	tags     []meta.Tag // global table, sorted
-	tagOn    []bool     // selection matching tags
+	tags  []meta.Tag // global table, sorted
+	tagOn []bool     // selection matching tags
+	// tagBad marks checklist entries that are not in the tag table. They are
+	// kept in the file (deleting a typo would destroy intent) but must be
+	// resolved before saving: either add them in the settings tag table, or
+	// untick them here.
+	tagBad   []bool
 	tagCount map[string]int
+	// tagQuery filters the checklist. With a large table the picker is a list to
+	// search and scroll, not a wall of chips: this keeps it navigable when there
+	// are hundreds of tags.
+	tagQuery string
+	// tagView is the indices of f.tags currently visible (all of them when the
+	// query is empty). The row cursor indexes into this, so a filter never
+	// moves the underlying selection.
+	tagView []int
+	tagOff  int // first visible line of the checklist
+	// tagTyping is true while the checklist is in text mode, so a space types a
+	// space instead of toggling a tag.
+	tagTyping bool
+	tagInput  textinput.Model
 
 	status  string
 	statusK bool
@@ -83,6 +103,24 @@ func (m *Model) openMetaForm() {
 			}
 		}
 	}
+	// Tags the table does not know are appended to the checklist so they are
+	// visible and removable, rather than silently missing from the form.
+	f.tagInput = textinput.New()
+	f.tagInput.Prompt = ""
+	f.tagInput.Placeholder = "type to filter, enter to keep"
+	f.tagInput.CharLimit = 128
+	f.tagInput.Blur()
+	f.tagBad = make([]bool, len(f.tags))
+	for _, used := range meta.NormalizeTags(e.Tags) {
+		if _, ok := m.lib.Store.Config.Tag(used); ok && !meta.CriticalTagName(used) {
+			// A known tag with an untidy name is still a tag: it is shown, not
+			// marked, because nothing about it is an error. --check reports it.
+			continue
+		}
+		f.tags = append(f.tags, meta.Tag{Name: used})
+		f.tagOn = append(f.tagOn, true)
+		f.tagBad = append(f.tagBad, true)
+	}
 
 	f.rows = []metaRow{
 		{label: "Title", kind: rowTitle, input: newInput(title, "required")},
@@ -95,10 +133,13 @@ func (m *Model) openMetaForm() {
 			label: extra, kind: rowExtra, area: newArea(e.FieldString(extra)),
 		})
 	}
+	f.rebuildTagView()
 	f.rows = append(f.rows, metaRow{label: "Tags", kind: rowTags})
 	f.rows = append(f.rows, metaRow{label: "Add tag", kind: rowNewTag, input: newInput("", "type a name and press enter")})
-	f.rows = append(f.rows, metaRow{label: "New field", kind: rowNewField,
-		input: newInput("", "name=value")})
+	f.rows = append(f.rows, metaRow{
+		label: "New field", kind: rowNewField,
+		input: newInput("", "name=value"),
+	})
 	f.rows = append(f.rows, metaRow{label: "", kind: rowAction})
 
 	m.metaForm = f
@@ -136,13 +177,7 @@ const maxAreaHeight = 10
 // a third of the screen, so the surrounding rows stay reachable. The text box
 // scrolls internally past that.
 func areaBudget(h int) int {
-	c := h / 4
-	if c < 3 {
-		c = 3
-	}
-	if c > maxAreaHeight {
-		c = maxAreaHeight
-	}
+	c := min(max(h/4, 3), maxAreaHeight)
 	return c
 }
 
@@ -153,12 +188,9 @@ func fitAreaHeight(ta *textarea.Model, value string, width, cap int) {
 		width = 10
 	}
 	n := 0
-	for _, para := range strings.Split(value, "\n") {
+	for para := range strings.SplitSeq(value, "\n") {
 		w := lipgloss.Width(para)
-		lines := (w + width - 1) / width
-		if lines < 1 {
-			lines = 1
-		}
+		lines := max((w+width-1)/width, 1)
 		n += lines
 	}
 	if n < 3 {
@@ -203,7 +235,7 @@ func (m *Model) moveMetaRow(delta int) {
 	} else {
 		// Wrap around, so a short form can be driven with one key.
 		n := len(f.rows)
-		for i := 0; i < n; i++ {
+		for range n {
 			f.cur = ((f.cur+delta)%n + n) % n
 			if f.selectable(f.cur) {
 				break
@@ -240,6 +272,16 @@ func (m *Model) focusMetaRow() {
 		f.rows[i].input.Blur()
 		f.rows[i].area.Blur()
 	}
+	// The picker's filter line is focused only while it is being typed into.
+	if f.tagTyping && f.cur >= 0 && f.cur < len(f.rows) && f.rows[f.cur].kind == rowTags {
+		f.tagInput.Focus()
+	} else {
+		f.tagInput.Blur()
+	}
+	// Leaving the picker ends its text mode, so a later j/k is a move again.
+	if f.cur < 0 || f.cur >= len(f.rows) || f.rows[f.cur].kind != rowTags {
+		f.tagTyping = false
+	}
 }
 
 // --- keys -----------------------------------------------------------------
@@ -251,6 +293,13 @@ func (m *Model) handleMetaFormKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	key := msg.String()
+	// A filter being typed owns every key, including esc, tab and the arrows.
+	// Handling it here rather than further down is what lets a tag name with a
+	// space be searched for: " " must reach the query, not toggle a tag, and esc
+	// must leave the filter rather than close the whole form.
+	if f.tagTyping {
+		return m.metaTagsKey(msg, key)
+	}
 	// Feedback is about the last action, not a permanent banner: any keypress
 	// clears it and the hint line returns. A handler that acts below sets its
 	// own message again, so an effective key still reports what it did.
@@ -318,7 +367,7 @@ func (m *Model) handleMetaFormKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	switch f.rows[f.cur].kind {
 	case rowTags:
-		return m.metaTagsKey(key)
+		return m.metaTagsKey(msg, key)
 	case rowTitle, rowAuthor, rowNewTag, rowNewField:
 		var cmd tea.Cmd
 		f.rows[f.cur].input, cmd = f.rows[f.cur].input.Update(msg)
@@ -331,28 +380,66 @@ func (m *Model) handleMetaFormKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// metaTagsKey handles the checklist row.
-func (m *Model) metaTagsKey(key string) (tea.Model, tea.Cmd) {
+// metaTagsKey handles the picker row.
+//
+// There are two states. Normally the keys are commands: space toggles, j/k and
+// the arrows move, "/" starts a filter. While typing a filter every printable
+// key belongs to the query, so a tag name with a space can be searched for; the
+// filter stays applied after enter, and esc clears it.
+func (m *Model) metaTagsKey(msg tea.KeyMsg, key string) (tea.Model, tea.Cmd) {
+	f := m.metaForm
+	if f.tagTyping {
+		switch key {
+		case "enter":
+			// Enter keeps the query and esc clears it, the same as the search
+			// and filter boxes on the main display. Two prompts in one program
+			// behaving in opposite ways is worse than either choice.
+			f.tagTyping = false
+			f.tagInput.Blur()
+			return m, nil
+		case "esc":
+			f.tagQuery = ""
+			f.tagInput.SetValue("")
+			f.tagTyping = false
+			f.tagInput.Blur()
+			f.rebuildTagView()
+			return m, nil
+		case "down", "ctrl+n":
+			f.tagTyping = false
+			f.tagInput.Blur()
+			m.metaFormMoveTag(1)
+			return m, nil
+		case "up", "ctrl+p":
+			f.tagTyping = false
+			f.tagInput.Blur()
+			m.metaFormMoveTag(-1)
+			return m, nil
+		}
+		var cmd tea.Cmd
+		f.tagInput, cmd = f.tagInput.Update(msg)
+		f.tagQuery = f.tagInput.Value()
+		f.rebuildTagView()
+		return m, cmd
+	}
+
 	switch key {
+	case "/":
+		f.tagTyping = true
+		f.tagInput.Focus()
+		f.tagInput.SetValue(f.tagQuery)
+		f.tagInput.CursorEnd()
+		return m, nil
 	case " ", "x":
 		m.metaFormToggleTag()
 		return m, nil
-	case "j", "right", "l":
+	case "j", "right", "l", "tab":
 		m.metaFormMoveTag(1)
 		return m, nil
-	case "k", "left", "h":
+	case "k", "left", "h", "shift+tab":
 		m.metaFormMoveTag(-1)
 		return m, nil
 	}
 	return m, nil
-}
-
-// tagCursor returns the index of the highlighted tag.
-func (f *metaForm) tagCursor() int {
-	if f.cur < 0 || f.cur >= len(f.rows) {
-		return 0
-	}
-	return f.rows[f.cur].tagsAt(f.tags)
 }
 
 // --- saving ---------------------------------------------------------------
@@ -381,8 +468,25 @@ func (m *Model) saveMetaForm() (tea.Model, tea.Cmd) {
 		f.setErr("a title is required")
 		return m, nil
 	}
+	// An unknown tag cannot be saved back: either add it to the tag table
+	// (settings) or untick it here. Refusing is the only option that neither
+	// silently deletes the tag nor writes an entry the table does not cover.
+	// Only a tag that cannot be used at all blocks saving: either the table does
+	// not know it, or its name would break a query. An untidy-but-known name is
+	// written as it is.
+	var bad []string
 	for i, on := range f.tagOn {
-		if on {
+		if i < len(f.tagBad) && f.tagBad[i] && on {
+			bad = append(bad, f.tags[i].Name)
+		}
+	}
+	if len(bad) > 0 {
+		f.setErr("unusable tag(s): " + strings.Join(bad, ", ") +
+			" — untick with space, or add them in settings")
+		return m, nil
+	}
+	for i, on := range f.tagOn {
+		if on && (i >= len(f.tagBad) || !f.tagBad[i]) {
 			tags = append(tags, f.tags[i].Name)
 		}
 	}
@@ -427,6 +531,14 @@ func (m *Model) metaFormAddTag(name string) bool {
 		f.setErr(err.Error())
 		return false
 	}
+	// A name that is already in the table is not an error: the intent -- "this
+	// paper should carry this tag" -- is fulfilled either way, so the tag is
+	// selected and a warning explains that it already existed. Refusing outright
+	// would be pedantic about something the user cannot see the harm in.
+	existing, duplicate := m.lib.Store.Config.Tag(name)
+	if duplicate {
+		name = existing.Name
+	}
 	canonical, added := m.lib.Store.Config.EnsureTag(name)
 	if added {
 		if err := m.lib.Store.Save(); err != nil {
@@ -447,9 +559,12 @@ func (m *Model) metaFormAddTag(name string) bool {
 	for i, t := range f.tags {
 		f.tagOn[i] = sel[strings.ToLower(t.Name)]
 	}
-	if added {
+	switch {
+	case added:
 		f.setStatus("added tag " + canonical)
-	} else {
+	case duplicate:
+		f.setErr("tag " + canonical + " already exists — selected it instead")
+	default:
 		f.setStatus("selected tag " + canonical)
 	}
 	return true
@@ -469,25 +584,103 @@ func (m *Model) metaFormToggleTag() {
 func (m *Model) metaFormMoveTag(delta int) {
 	f := m.metaForm
 	r := &f.rows[f.cur]
-	c := r.tagPos + delta
-	if len(f.tags) == 0 {
+	n := len(f.tagView)
+	if n == 0 {
 		return
 	}
+	c := r.tagPos + delta
 	if c < 0 {
-		c = len(f.tags) - 1
+		c = n - 1
 	}
-	if c >= len(f.tags) {
+	if c >= n {
 		c = 0
 	}
 	r.tagPos = c
+	f.tagOff = clampTagOff(f.tagOff, c, n, m.tagPickerRows())
 }
 
-// tagCursor returns the highlighted index of the checklist row.
-func (r metaRow) tagsAt(tags []meta.Tag) int {
-	if r.tagPos < 0 || r.tagPos >= len(tags) {
+// rebuildTagView recomputes the visible indices from the query, keeping the
+// cursor inside the new view and as close as possible to where it was.
+func (f *metaForm) rebuildTagView() {
+	prev := f.tagCursor()
+	var sel string
+	if prev >= 0 && prev < len(f.tagView) && f.tagView[prev] < len(f.tags) {
+		sel = f.tags[f.tagView[prev]].Name
+	}
+	f.tagView = f.tagView[:0]
+	q := strings.ToLower(strings.TrimSpace(f.tagQuery))
+	for i, t := range f.tags {
+		if q == "" || strings.Contains(strings.ToLower(t.Name), q) {
+			f.tagView = append(f.tagView, i)
+		}
+	}
+	// Keep the cursor on the same tag when it survived the filter.
+	pos := 0
+	if sel != "" {
+		for vi, ti := range f.tagView {
+			if strings.EqualFold(f.tags[ti].Name, sel) {
+				pos = vi
+				break
+			}
+		}
+	}
+	if f.cur >= 0 && f.cur < len(f.rows) {
+		f.rows[f.cur].tagPos = pos
+	}
+	f.tagOff = 0
+}
+
+// tagCursor returns the index into f.tags of the highlighted tag.
+func (f *metaForm) tagCursor() int {
+	vi := f.tagCursorView()
+	if vi < 0 || vi >= len(f.tagView) {
 		return 0
 	}
-	return r.tagPos
+	return f.tagView[vi]
+}
+
+// tagCursorView is the position within the visible list.
+func (f *metaForm) tagCursorView() int {
+	if f.cur < 0 || f.cur >= len(f.rows) {
+		return 0
+	}
+	vi := f.rows[f.cur].tagPos
+	if vi < 0 || vi >= len(f.tagView) {
+		return 0
+	}
+	return vi
+}
+
+// clampTagOff keeps the first visible line such that the cursor is on screen.
+func clampTagOff(off, cur, n, rows int) int {
+	if n == 0 || rows <= 0 {
+		return 0
+	}
+	if cur < off {
+		off = cur
+	}
+	if cur >= off+rows {
+		off = cur - rows + 1
+	}
+	if off < 0 {
+		off = 0
+	}
+	if max := n - rows; off > max {
+		off = max
+	}
+	if off < 0 {
+		off = 0
+	}
+	return off
+}
+
+// tagPickerRows is how many checklist lines fit on screen. The picker is
+// bounded so a table of hundreds of tags cannot push the rest of the form off.
+func (m *Model) tagPickerRows() int {
+	if m.height < 20 {
+		return 4
+	}
+	return 8
 }
 
 // viewMetaForm renders the inline editor.
@@ -509,10 +702,8 @@ func (m *Model) viewMetaForm() string {
 	boxH := m.modalHeight(m.metaFormHeight())
 
 	all, starts, ends := m.layoutMetaForm(boxW - 2)
-	avail := boxH - 4 // two border rows, separator, footer
-	if avail < 1 {
-		avail = 1
-	}
+	// two border rows, separator, footer
+	avail := max(boxH-4, 1)
 	// Keep the cursor row fully on screen.
 	cur := f.cur
 	if cur >= 0 && cur < len(starts) {
@@ -568,6 +759,14 @@ func (m *Model) metaFormFooter() string {
 		switch f.rows[f.cur].kind {
 		case rowTags:
 			hint = "tab move  ←/→ pick  space toggle  ctrl+s save  esc cancel"
+			if len(f.tagBad) > 0 {
+				for i, bad := range f.tagBad {
+					if bad && i < len(f.tagOn) && f.tagOn[i] {
+						hint = "! " + f.tags[i].Name + " is not in the tag table: untick it or add it in settings"
+						break
+					}
+				}
+			}
 		case rowAbstract, rowComment, rowExtra:
 			hint = "tab move  enter newline  ctrl+s save  esc cancel"
 		case rowNewTag:
@@ -604,7 +803,7 @@ func (m *Model) layoutMetaForm(w int) (lines []string, starts, ends []int) {
 			area := r.area
 			area.SetWidth(maxInt(inner-4, 10))
 			fitAreaHeight(&area, area.Value(), maxInt(inner-4, 10), areaBudget(m.height))
-			for _, l := range strings.Split(area.View(), "\n") {
+			for l := range strings.SplitSeq(area.View(), "\n") {
 				lines = append(lines, "    "+l)
 			}
 			lines = append(lines, "")
@@ -619,46 +818,91 @@ func (m *Model) layoutMetaForm(w int) (lines []string, starts, ends []int) {
 	return lines, starts, ends
 }
 
-// metaTagLines renders the tag checklist, wrapped to the pane width.
+// metaTagLines renders the tag picker: a filter line, then a scrolling window
+// over the visible tags.
+//
+// It is a list rather than a wall of chips because a real collection has
+// hundreds of tags: wrapping them all would push every other field off the
+// screen, and there would be no way to reach one whose name you do not want to
+// type in full. Bounding the window means the form has the same height whatever
+// the table size, and typing narrows it.
 func (m *Model) metaTagLines(r metaRow, w int, cur bool) []string {
 	f := m.metaForm
 	if len(f.tags) == 0 {
 		return []string{"    " + stDim.Render("no tags in the table yet — add one below")}
 	}
-	var chips []string
-	pos := 0
-	cursor := r.tagPos
-	for i, t := range f.tags {
-		box := "[-]"
-		if f.tagOn[i] {
+
+	// The filter line. It is always shown, so the picker's shape does not change
+	// when it is focused, and it doubles as the indication of what is filtered.
+	input := f.tagInput
+	input.Width = maxInt(w-8, 8)
+	switch {
+	case f.tagTyping && cur:
+		lines := []string{"    " + input.View()}
+		return append(lines, m.tagWindow(r, w, cur)...)
+	case f.tagQuery != "":
+		return append([]string{"    " + stAccent.Render("/") + " " + stDim.Render(f.tagQuery)}, m.tagWindow(r, w, cur)...)
+	}
+	out := []string{"    " + stDim.Render(fmt.Sprintf("%d tags — / to filter", len(f.tags)))}
+	return append(out, m.tagWindow(r, w, cur)...)
+}
+
+// tagWindow renders the visible slice of the picker, marking the cursor and the
+// entries the tag table does not know.
+func (m *Model) tagWindow(r metaRow, w int, cur bool) []string {
+	f := m.metaForm
+	n := len(f.tagView)
+	rows := m.tagPickerRows()
+	if n == 0 {
+		return []string{"    " + stDim.Render("no tag matches "+strconv.Quote(f.tagQuery))}
+	}
+	off := min(r.tagPos, f.tagOff)
+	if r.tagPos >= off+rows {
+		off = r.tagPos - rows + 1
+	}
+	off = clampTagOff(off, r.tagPos, n, rows)
+	end := minInt(off+rows, n)
+
+	out := make([]string, 0, end-off)
+	for vi := off; vi < end; vi++ {
+		ti := f.tagView[vi]
+		t := f.tags[ti]
+		box, mark := "[-]", "  "
+		if f.tagOn[ti] {
 			box = "[x]"
 		}
-		label := box + " " + t.Name
-		if cur && i == cursor {
-			chips = append(chips, stCursor.Render("▸"+label))
-		} else if f.tagOn[i] {
-			chips = append(chips, stTag.Render(label))
-		} else {
-			chips = append(chips, stDim.Render(label))
+		if vi == r.tagPos && cur {
+			mark = "▸ "
 		}
-		pos += len(label) + 2
-	}
-	// Wrap chips into lines of the available width.
-	var out []string
-	line := "    "
-	width := 0
-	for _, c := range chips {
-		cw := lipgloss.Width(c)
-		if width > 0 && width+cw+2 > w {
-			out = append(out, line)
-			line = "    "
-			width = 0
+		bad := ti < len(f.tagBad) && f.tagBad[ti]
+		label := mark + box + " " + t.Name
+		if bad {
+			label = "▸ [!] " + t.Name
+			if vi != r.tagPos || !cur {
+				label = "  [!] " + t.Name
+			}
 		}
-		line += c + "  "
-		width += cw + 2
+		// A count is what makes the list scannable: it says at a glance which
+		// tags this collection actually uses.
+		if c := f.tagCount[f.tags[ti].Name]; c > 0 {
+			label += stDim.Render(fmt.Sprintf("  %d", c))
+		}
+		switch {
+		case bad:
+			out = append(out, "    "+stErr.Render(app.Truncate(label, w-4)))
+		case vi == r.tagPos && cur:
+			out = append(out, "    "+stCursor.Render(fit(label, maxInt(w-4, 4))))
+		case f.tagOn[ti]:
+			out = append(out, "    "+stTag.Render(app.Truncate(label, w-4)))
+		default:
+			out = append(out, "    "+stDim.Render(app.Truncate(label, w-4)))
+		}
 	}
-	if strings.TrimSpace(line) != "" {
-		out = append(out, line)
+	if off > 0 {
+		out = append([]string{"    " + stFaint.Render(fmt.Sprintf("↑ %d more", off))}, out...)
+	}
+	if end < n {
+		out = append(out, "    "+stFaint.Render(fmt.Sprintf("↓ %d more", n-end)))
 	}
 	return out
 }

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -175,10 +176,8 @@ func CleanFilename(name string) FilenameChange {
 	var b strings.Builder
 	var removed []string
 	note := func(s string) {
-		for _, existing := range removed {
-			if existing == s {
-				return
-			}
+		if slices.Contains(removed, s) {
+			return
 		}
 		removed = append(removed, s)
 	}

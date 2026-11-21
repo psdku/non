@@ -185,6 +185,7 @@ $ non --tags kvcache --paths | xargs -d '\n' zathura
 | `--count` | print only the number of matches |
 | `--search-meta` | let `--query` match author, tags and abstract too |
 | `--no-write` | never modify `.non.json` (extract into a temporary entry) |
+| `--check` | report tag problems and exit non-zero, writing nothing |
 
 `--tags` composes with `--list` as well, so `non --list --tags LLM` lists the
 LLM papers with their full records. Unknown tag names produce a warning on
@@ -293,17 +294,104 @@ nothing usable are reported rather than added.
 
 ### Tags
 
-Tags are not free text, and a tag name may only contain letters, digits and
-underscores: tag names are typed into filter expressions, where every other
-character is an operator, a quote or an escape. The underscore is the
-convention for a space.
+Tags are not free text. A name may contain letters, digits, `_`, `-` and `&` —
+enough for `attention-mechanisms` and `R&D`.
+Quotes, backslashes, `,`, `:`, `!`, `|` and `&&` are reserved, because a name
+holding one could not be written in a filter expression without quoting. A lone
+`&` is fine: it is only the pair that means AND.
+
+A **space is deliberately not allowed**. Two names written next to each other
+mean AND in a filter, so a name with a space could only be queried by quoting it
+every time — a tax on every query to pay for something `-` or `_` expresses just
+as well. A CSV import of `KV cache` stores `KV-cache`.
+
+**Parentheses are not allowed either.** They look tempting for a qualifier —
+`retrieval-(dense)` — but the tag description says the same thing better, and a
+parenthesis is a grouping operator in the filter grammar, so every use of such a
+name would need quoting. Sanitizing turns them into dashes: `retrieval (dense)`
+becomes `retrieval-dense`.
+
+The rule is enforced when a name is written, never when the file is read — an
+older store with a name outside it still opens, and the name is reported (see
+below) rather than making the collection unusable.
 
 The global table gives every tag a **name** — what
 shows on the paper and in the list — and a **description** — what makes the
-table worth reading. The built-in metadata form shows the table as a checklist,
-so a paper can only carry tags that exist; a new tag is created from the
-"add tag" row and immediately joins the table. Renaming or deleting a tag in
-the table follows through to every paper that uses it.
+table worth reading. The built-in metadata form shows the table as a picker, so
+a paper can only carry tags that exist; a new tag is created from the "add tag"
+row and immediately joins the table. Renaming or deleting a tag in the table
+follows through to every paper that uses it.
+
+Tag names are quoted wherever they are joined on one line, so `a b` as a single
+tag cannot be confused with the two tags `a` and `b`. The picker is a scrolling
+window, not a wall of chips: a collection with hundreds
+of tags would otherwise push every other field off the screen. It shows how many
+tags there are, how many are hidden, and how often each is used; `/` filters it
+(the query may hold any character, including a space) and the arrow keys
+move. The form's height is the same whether the table has thirty tags or three
+hundred.
+
+A tag name is unique **regardless of case**: `llm`, `LlM` and `LLM` are one tag,
+and adding or renaming onto an existing spelling never creates a second row
+nobody could tell apart. Adding a tag that already exists selects it and says so,
+because the intent — "this paper carries this tag" — is fulfilled either way.
+
+#### When the file is wrong
+
+The metadata file can be edited by hand, or by another script. `non` treats
+problems by how far they get in the way, because only one kind can be fixed
+without losing information:
+
+* **Duplicates are repaired on load, silently.** A tag repeated in one entry, or
+  twice in the table with different case, is merged. Nothing is lost — the tag
+  survives, and a description from the dropped row is kept — so there is nothing
+  to ask about. The repair is in memory: the file is only rewritten when
+  something else saves it, so a read never changes what is on disk.
+* **An unknown tag is reported, never deleted.** A tag on a paper that the table
+  does not know is *hidden from the display* — the list row, the details pane,
+  the footer and the `--list` tags column — because showing it as if it were real
+  makes the warning easy to forget. It stays in the file, and the metadata form
+  lists it in red as `[!] typo` and refuses to save while it is ticked: either
+  untick it (removing it), or add it in the tag table. A typo is one keystroke
+  from a real tag, and unrecoverable once deleted, so the decision stays with you.
+
+  Queries still match it. Hiding a tag from the display says "fix this"; hiding it
+  from the query language too would leave the paper unreachable until the file was
+  repaired, and a quoted name is an explicit act. When a filter *did* match on
+  such a tag, the row shows it in red — otherwise the user would be looking at a
+  file that appears to match nothing.
+* **A name that would break a query is treated the same way** — hidden from the
+  display, marked `[!]` in the picker, blocking on save — because `KV cache` or
+  `a|b` could only be queried by quoting. Quoting is supported for exactly this
+  case, so a query still works before the file is fixed:
+
+  ```
+  non --tags '"KV cache"' .
+  ```
+* **A known name with an untidy character is only reported.** `weird.name` or
+  `a/b` lexes as a bare name, so it displays, filters and saves normally;
+  `--check` mentions it and exits 0. The write rule keeps new data tidy; enforcing
+  it on old data would hide the user's own tags over a punctuation mark.
+
+The warning appears in the status bar on startup, and on stderr for the
+non-interactive flags:
+
+```
+$ non --list
+non: warning: 1 unusable tag(s): typo
+     fix them with the metadata editor (m), or add them in settings (s)
+```
+
+`--check` reports problems, without writing anything, for a script that
+generates metadata. It exits non-zero only for what actually blocks — an unknown
+tag, or a name that cannot be queried — and exits 0 when everything found is
+merely untidy:
+
+```
+$ non --check
+.non.json: 1 problem(s)
+  a.pdf: tag "typo" is not in the tag table
+```
 
 ### File names
 
@@ -340,7 +428,11 @@ The dominant sequence transduction models are based on complex recurrent …
 ```
 
 The first `#` heading is the title and is mandatory — `non` refuses to save a
-document without one. `- Author:` and `- Tags:` are recognised bullets; any
+document without one. A document that does not parse, or that names a tag the
+tag table does not know, is **discarded**: the metadata is left unchanged and the
+error says so. The editor's text is *not* deleted with it — the temp file is kept
+and its path goes into the message, so one wrong tag does not cost the whole
+edit. `- Author:` and `- Tags:` are recognised bullets; any
 other `- Key: value` bullet becomes an extra field. `# Comment` and
 `# Abstract` hold free text (a suffix in parentheses is ignored). Any other
 heading is stored as an extra field whose value is the section body, so new
@@ -453,8 +545,14 @@ internal/tui             the Bubble Tea model, update and view, plus the
 ## Tests
 
 ```
-go test ./...
+go test ./...      # the model
+tests/run.sh       # the terminal: the real binary in tmux, driven by keys
 ```
+
+The Go tests cover the model, the parser, the store and the rendering functions.
+The `tests/` scripts cover what only the terminal can show: a key that never
+reaches its handler, a view that does not repaint, a cursor drawn twice. They
+need `tmux` and run in about four seconds; see `tests/README.md`.
 
 The sample PDFs live in `samples/` and are git-ignored: they are fixtures, not
 content.

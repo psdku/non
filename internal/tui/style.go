@@ -149,16 +149,10 @@ func overlayCard(box, base string, w, h int) string {
 		bl = append(bl, "")
 	}
 	bw, bh := lipgloss.Width(box), lipgloss.Height(box)
-	top := (h - bh) / 2
-	if top < 0 {
-		top = 0
-	}
-	left := (w - bw) / 2
-	if left < 0 {
-		left = 0
-	}
+	top := max((h-bh)/2, 0)
+	left := max((w-bw)/2, 0)
 	out := make([]string, 0, h)
-	for i := 0; i < h; i++ {
+	for i := range h {
 		line := ""
 		if i < len(bl) {
 			line = bl[i]
@@ -183,7 +177,7 @@ func joinRows(a, b string) string {
 	bl := strings.Split(b, "\n")
 	n := maxInt(len(al), len(bl))
 	out := make([]string, 0, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		var l, r string
 		if i < len(al) {
 			l = al[i]

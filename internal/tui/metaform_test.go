@@ -17,6 +17,9 @@ func inlineModel(t *testing.T, tags ...string) *Model {
 	})
 	_ = m.lib.Rescan()
 	m.lib.Store.Config.UseEditor = false
+	// The fixture entry carries "kvcache", so the table must know it; otherwise
+	// the form would (correctly) show it as an unknown tag.
+	m.lib.Store.Config.SetTag(-1, meta.Tag{Name: "kvcache"})
 	for _, tag := range tags {
 		m.lib.Store.Config.SetTag(-1, meta.Tag{Name: tag})
 	}

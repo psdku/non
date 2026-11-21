@@ -12,6 +12,8 @@ import (
 // the list unreadable.
 func TestListRowIsNameAndTags(t *testing.T) {
 	m := newTestModel(t, "1706.03762v7.pdf")
+	m.lib.Store.Config.SetTag(-1, meta.Tag{Name: "attention"})
+	m.lib.Store.Config.SetTag(-1, meta.Tag{Name: "LLM"})
 	m.lib.Store.Set("1706.03762v7.pdf", &meta.Entry{
 		Title:  "Attention Is All You Need",
 		Author: "Ashish Vaswani",
@@ -38,6 +40,7 @@ func TestListRowIsNameAndTags(t *testing.T) {
 // Tags sit flush right, so they form a column the eye can scan.
 func TestListRowTagsAreRightAligned(t *testing.T) {
 	m := newTestModel(t, "a.pdf")
+	m.lib.Store.Config.SetTag(-1, meta.Tag{Name: "x"})
 	m.lib.Store.Set("a.pdf", &meta.Entry{Title: "T", Tags: []string{"x"}})
 	_ = m.lib.Rescan()
 	m.rebuild()
@@ -68,6 +71,9 @@ func TestListRowWithoutTags(t *testing.T) {
 // identifies the row.
 func TestListRowNarrowKeepsName(t *testing.T) {
 	m := newTestModel(t, "a-long-file-name.pdf")
+	for _, t := range []string{"verylongtagname", "another"} {
+		m.lib.Store.Config.SetTag(-1, meta.Tag{Name: t})
+	}
 	m.lib.Store.Set("a-long-file-name.pdf", &meta.Entry{
 		Title: "T", Tags: []string{"verylongtagname", "another"},
 	})

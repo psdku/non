@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -93,10 +94,25 @@ type Model struct {
 
 // Open builds a model for the given directory.
 func Open(dir string) (*Model, error) {
-	lib, err := app.OpenDir(dir)
+	return OpenLibrary(dir, nil)
+}
+
+// OpenLibrary opens a directory, letting the user configuration fill in tools
+// and tags the collection does not define.
+//
+// It takes the library rather than reopening it from a path, because main has
+// already loaded it (with the global config) and reapplying flags to a second
+// instance would drop exactly the inheritance this exists to provide.
+func OpenLibrary(dir string, global *meta.GlobalConfig) (*Model, error) {
+	lib, err := app.OpenDirWith(dir, global)
 	if err != nil {
 		return nil, err
 	}
+	return New(lib)
+}
+
+// New builds the model around an already loaded library.
+func New(lib *app.Library) (*Model, error) {
 	m := &Model{lib: lib, dir: lib.Dir}
 	m.search = textinput.New()
 	m.search.Placeholder = "fuzzy search…"
@@ -112,6 +128,13 @@ func Open(dir string) (*Model, error) {
 	m.metaUI = lib.Store.Config.SearchMeta
 	m.rebuild()
 	m.refreshStatus()
+	// A store that another tool (or a hand edit) left with tags the table does
+	// not know is a visible problem, not something to discover later: say so on
+	// startup and leave it to the user to fix in the metadata form.
+	if bad := lib.Store.BlockingTags(); len(bad) > 0 {
+		m.setErr(fmt.Sprintf("%d unusable tag(s): %s — press m to fix, or add them in settings",
+			len(bad), strings.Join(bad, ", ")))
+	}
 	return m, nil
 }
 
@@ -239,7 +262,7 @@ func (m *Model) filterMatch(p *app.Paper) bool {
 	if m.filterTree == nil {
 		return true
 	}
-	return app.PaperHasTags(p, m.filterTree)
+	return app.PaperHasTags(m.lib, p, m.filterTree)
 }
 
 // setFilterText parses a new filter expression and rebuilds. A parse error
@@ -493,9 +516,9 @@ type confirm struct {
 // Warning is the explanatory line of the dialog, which is the last non-empty
 // line before the buttons.
 func (c *confirm) Warning() string {
-	for i := len(c.lines) - 1; i >= 0; i-- {
-		if strings.TrimSpace(c.lines[i]) != "" {
-			return c.lines[i]
+	for _, v := range slices.Backward(c.lines) {
+		if strings.TrimSpace(v) != "" {
+			return v
 		}
 	}
 	return ""

@@ -3,9 +3,8 @@ package meta
 import (
 	"errors"
 	"fmt"
-	"strings"
-
 	"regexp"
+	"strings"
 )
 
 // The editor format is a small, forgiving subset of Markdown:
@@ -30,8 +29,10 @@ import (
 //     extra field whose value is the section body, so new fields need no code.
 //   - Text before the first heading is ignored.
 
-var headingRE = regexp.MustCompile(`^#\s*(.*)$`)
-var bulletRE = regexp.MustCompile(`^\s*[-*]\s*([^:]+):\s*(.*)$`)
+var (
+	headingRE = regexp.MustCompile(`^#\s*(.*)$`)
+	bulletRE  = regexp.MustCompile(`^\s*[-*]\s*([^:]+):\s*(.*)$`)
+)
 
 // ErrNoTitle is returned when the document has no title heading.
 var ErrNoTitle = errors.New("metadata is missing a title (first line: `# Title`)")
@@ -54,10 +55,10 @@ func ParseMarkdown(src string) (*Entry, error) {
 			return
 		}
 		text := strings.TrimSpace(strings.Join(body, "\n"))
-		switch {
-		case section == "comment":
+		switch section {
+		case "comment":
 			e.Comment = text
-		case section == "abstract":
+		case "abstract":
 			e.Abstract = text
 		default:
 			if text != "" {

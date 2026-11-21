@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"runtime"
 	"sort"
 	"strings"
@@ -50,9 +51,7 @@ type Tag struct {
 // MarshalJSON encodes a tag, merging any extra fields.
 func (t Tag) MarshalJSON() ([]byte, error) {
 	m := make(map[string]json.RawMessage, len(t.Fields)+2)
-	for k, v := range t.Fields {
-		m[k] = v
-	}
+	maps.Copy(m, t.Fields)
 	name, err := json.Marshal(t.Name)
 	if err != nil {
 		return nil, err
@@ -131,9 +130,7 @@ type Config struct {
 // MarshalJSON encodes the config, merging unknown keys.
 func (c Config) MarshalJSON() ([]byte, error) {
 	m := make(map[string]json.RawMessage, len(c.Fields)+6)
-	for k, v := range c.Fields {
-		m[k] = v
-	}
+	maps.Copy(m, c.Fields)
 	put := func(k string, v any, skip bool) {
 		if skip {
 			delete(m, k)
@@ -439,10 +436,19 @@ func (c *Config) SetTag(index int, t Tag) {
 	if !ValidTagName(t.Name) {
 		return
 	}
-	if index < 0 || index >= len(c.TagTable) {
-		if t.Name != "" {
-			c.TagTable = append(c.TagTable, t)
+	// A name is unique regardless of case, so adding or renaming onto an
+	// existing spelling is refused. Without this the table accumulates rows the
+	// user cannot tell apart, which is exactly the corruption Load repairs.
+	for i, existing := range c.TagTable {
+		if i == index {
+			continue
 		}
+		if strings.EqualFold(existing.Name, t.Name) {
+			return
+		}
+	}
+	if index < 0 || index >= len(c.TagTable) {
+		c.TagTable = append(c.TagTable, t)
 		return
 	}
 	c.TagTable[index] = t
@@ -610,4 +616,240 @@ func ParseToolSpec(spec string) (Tool, error) {
 func (c Config) empty() bool {
 	return !c.UseEditor && !c.SearchMeta && len(c.Tools) == 0 &&
 		c.DefaultTool == "" && len(c.TagTable) == 0 && c.LegacyOpener == ""
+}
+
+// ---- tag table integrity -------------------------------------------------
+
+// TagProblem is one tag on a paper that the tag table does not know about, or
+// whose name cannot be used.
+type TagProblem struct {
+	Entry string // file name
+	Tag   string // the offending tag, spelled as the entry has it
+
+	// Critical marks a name that breaks the filter parser, so a query cannot
+	// refer to it without quoting: a space, "&&", "||" or a quote. A non-critical
+	// problem (a comma, say) is worth reporting but does not get in the way, so
+	// it is hidden from no display and refused at no point.
+	Critical bool
+}
+
+// Problems lists every tag used by an entry that is missing from the tag table.
+//
+// This is reported rather than repaired on load: the store may have been edited
+// by hand or by another tool, and quietly deleting a tag would destroy the
+// user's intent (a typo like "kv-cache" is one corrected keystroke away from a
+// real tag, but unrecoverable once deleted). The file is left byte-identical
+// until the user decides what to do.
+func (s *Store) Problems() []TagProblem {
+	names := make([]string, 0, len(s.Entries))
+	for name := range s.Entries {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var out []TagProblem
+	for _, name := range names {
+		e := s.Entries[name]
+		if e == nil {
+			continue
+		}
+		for _, t := range e.Tags {
+			if !ValidTagName(t) {
+				out = append(out, TagProblem{Entry: name, Tag: t, Critical: CriticalTagName(t)})
+				continue
+			}
+			if _, ok := s.Config.Tag(t); !ok {
+				out = append(out, TagProblem{Entry: name, Tag: t})
+			}
+		}
+	}
+	return out
+}
+
+// UnknownTags is the distinct set of unknown tag names, for a one-line warning.
+// Matching is case-insensitive and the result is sorted.
+func (s *Store) UnknownTags() []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, p := range s.Problems() {
+		key := strings.ToLower(p.Tag)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, p.Tag)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// ProblemTagsFor is the set of tags on one entry that the table does not know,
+// lowercased, so a display or a form can mark them.
+func (s *Store) ProblemTagsFor(name string) map[string]bool {
+	e := s.Entries[name]
+	if e == nil {
+		return nil
+	}
+	var out map[string]bool
+	for _, t := range e.Tags {
+		if !s.BlocksTag(t) {
+			continue
+		}
+		if out == nil {
+			out = map[string]bool{}
+		}
+		out[strings.ToLower(t)] = true
+	}
+	return out
+}
+
+// BlocksTag reports whether a tag cannot be used: the table does not know it, or
+// its name would have to be quoted in every query. A known name with an untidy
+// character is not blocked -- it is displayed and matched like any other.
+func (s *Store) BlocksTag(t string) bool {
+	if _, ok := s.Config.Tag(t); !ok {
+		return true
+	}
+	return CriticalTagName(t)
+}
+
+// CriticalProblems lists only the problems that get in the way of querying or
+// saving. Non-critical ones are reported by --check and otherwise left alone:
+// a comma in a name is untidy, not dangerous.
+func (s *Store) CriticalProblems() []TagProblem {
+	var out []TagProblem
+	for _, p := range s.Problems() {
+		if p.Critical {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// UnknownTags reports the tags that must be resolved: those the table does not
+// know, plus the ones whose name would break a query. A non-critical name that
+// is otherwise known is not included, so an old tag with a comma keeps working.
+func (s *Store) BlockingTags() []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, p := range s.Problems() {
+		if !s.BlocksTag(p.Tag) {
+			continue
+		}
+		key := strings.ToLower(p.Tag)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, p.Tag)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// ValidTags returns only the tags of an entry that the table knows, in their
+// table spelling. It is what a display uses, so an unknown tag is hidden rather
+// than shown as if it were real.
+func (s *Store) ValidTags(name string) []string {
+	e := s.Entries[name]
+	if e == nil {
+		return nil
+	}
+	out := make([]string, 0, len(e.Tags))
+	for _, t := range e.Tags {
+		if !ValidTagName(t) {
+			continue
+		}
+		if tag, ok := s.Config.Tag(t); ok {
+			out = append(out, tag.Name)
+		}
+	}
+	return NormalizeTags(out)
+}
+
+// canonicalizeTags rewrites an entry's tag list so that every tag uses the
+// table's spelling and appears once.
+//
+// This is the one repair applied on load without asking, because it cannot lose
+// information: the tag itself survives, only a duplicate of it (in another case)
+// and a stray difference in spelling are dropped. Unknown tags are deliberately
+// left alone -- see Problems.
+func (s *Store) canonicalizeTags() {
+	for _, e := range s.Entries {
+		if e == nil || len(e.Tags) == 0 {
+			continue
+		}
+		out := make([]string, 0, len(e.Tags))
+		seen := make(map[string]bool, len(e.Tags))
+		for _, t := range NormalizeTags(e.Tags) {
+			if tag, ok := s.Config.Tag(t); ok {
+				t = tag.Name
+			}
+			key := strings.ToLower(t)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			out = append(out, t)
+		}
+		e.Tags = out
+	}
+}
+
+// canonicalizeTable drops duplicate tag rows (case-insensitively) from the tag
+// table itself, keeping the first spelling and the first non-empty
+// description. Duplicates can only get in by hand-editing the file.
+func (c *Config) canonicalizeTable() {
+	out := make([]Tag, 0, len(c.TagTable))
+	seen := make(map[string]int, len(c.TagTable))
+	for _, t := range c.TagTable {
+		t.Name = strings.TrimSpace(t.Name)
+		t.Description = strings.TrimSpace(t.Description)
+		// Only an empty name is dropped. A name outside the current rule is kept
+		// as it is: the rule governs what may be written, not what may exist, and
+		// silently deleting the user's tag row would be the worst possible
+		// reading of "report a problem".
+		if t.Name == "" {
+			continue
+		}
+		key := strings.ToLower(t.Name)
+		if i, dup := seen[key]; dup {
+			// Keep a description that the first row lacked.
+			if out[i].Description == "" && t.Description != "" {
+				out[i].Description = t.Description
+			}
+			continue
+		}
+		seen[key] = len(out)
+		out = append(out, t)
+	}
+	c.TagTable = out
+}
+
+// Normalize repairs what can be repaired losslessly: duplicate tag rows and
+// per-entry duplicates in a different case. It is called on load, so a file
+// hand-edited into that state behaves as if it had been merged.
+func (s *Store) Normalize() {
+	s.Config.canonicalizeTable()
+	s.canonicalizeTags()
+}
+
+// ValidateTags checks a tag list against the table, returning the names that
+// cannot be written: the ones the table does not know, and the ones whose name
+// would have to be quoted in every query.
+//
+// A known name with an untidy character is accepted. The rule on writing is a
+// courtesy that keeps new data tidy; enforcing it on old data would hide the
+// user's own tags from them over a punctuation mark.
+func (s *Store) ValidateTags(tags []string) []string {
+	var bad []string
+	for _, t := range NormalizeTags(tags) {
+		if _, ok := s.Config.Tag(t); !ok {
+			bad = append(bad, t)
+			continue
+		}
+		if CriticalTagName(t) {
+			bad = append(bad, t)
+		}
+	}
+	return bad
 }

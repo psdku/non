@@ -6,53 +6,118 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
+	"unicode"
 )
 
-// Tag names are deliberately narrow: letters, digits and underscores. A tag is
-// typed in the filter expression language, where every other character is
-// either an operator, a quote, or an escape — allowing them would mean asking
-// the user to quote tag names to filter by them, which is not worth it.
+// Tag names allow letters, digits, underscore, dash, ampersand and parentheses:
+// enough for "attention-mechanisms", "R&D" and "retrieval (dense)".
 //
-// Unicode letters are allowed so a name can be written in one's own script, but
-// punctuation and spaces are not. The underscore stands in for a space, which
-// is the convention the rest of the file already uses.
-var tagNameRE = regexp.MustCompile(`^[\p{L}\p{N}_]+$`)
+// A space is deliberately NOT allowed. Two tags written next to each other mean
+// AND in a filter, so a name with a space could only be queried by quoting it --
+// and quoting every tag that happens to have two words is a tax on every query,
+// to pay for something "-" or "_" expresses just as well. Quotes, backslashes,
+// commas, colons and the operator pairs "&&" and "||" are reserved for the same
+// reason; a lone '&' is not an operator, so "R&D" needs no quoting.
+//
+// The rule is enforced on write, never on read: a name outside it is reported as
+// a problem (see Store.Problems) rather than making the file unopenable. That is
+// what keeps a stricter or looser future rule from locking anyone out.
+var tagNameRE = regexp.MustCompile(`^[\p{L}\p{N}_&-]+$`)
 
-// ErrTagName is returned for a tag name that is empty or has a character
-// outside letters, digits and underscore.
-var ErrTagName = errors.New("a tag name may only contain letters, digits and underscores")
+// ErrTagName is returned for a tag name that is empty or has a reserved
+// character.
+var ErrTagName = errors.New("a tag name may only contain letters, digits and _ - &")
 
 // ValidTagName reports whether a tag name is acceptable.
-func ValidTagName(name string) bool { return tagNameRE.MatchString(name) }
+func ValidTagName(name string) bool {
+	name = strings.TrimSpace(name)
+	if name == "" || !tagNameRE.MatchString(name) {
+		return false
+	}
+	// A name needs at least one letter or digit: "&" or "---" is punctuation
+	// looking for a meaning, not a tag.
+	hasLetter := false
+	for _, r := range name {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			hasLetter = true
+			break
+		}
+	}
+	if !hasLetter {
+		return false
+	}
+	// A run of two or more of the same operator character would read as "&&" or
+	// "||" in a filter, so it is reserved. A lone one is fine.
+	for _, pair := range []string{"&&", "||"} {
+		if strings.Contains(name, pair) {
+			return false
+		}
+	}
+	return true
+}
 
-// SanitizeTagName turns arbitrary text into an acceptable tag name: spaces and
-// punctuation become underscores, runs of underscores collapse, and leading or
-// trailing underscores are dropped. It returns "" when nothing usable is left.
+// SanitizeTagName turns arbitrary text into an acceptable tag name: runs of
+// reserved punctuation collapse to an underscore, spaces are kept. It returns ""
+// when nothing usable is left.
 func SanitizeTagName(s string) string {
 	var b strings.Builder
 	lastUnderscore := false
 	for _, r := range strings.TrimSpace(s) {
-		switch {
-		case r == '_' || r == '-' || r == '.' || r == ' ' || r == '/' || r == '\t':
+		switch r {
+		case ' ':
+			// A space would force quoting in every query; a dash says the same
+			// thing and needs none.
 			if b.Len() > 0 && !lastUnderscore {
-				b.WriteByte('_')
+				b.WriteByte('-')
 				lastUnderscore = true
 			}
+		case '(', ')':
+			// A qualifier in parentheses is a description's job, so the
+			// parenthesis becomes a separator rather than a trailing underscore:
+			// "retrieval (dense)" reads as "retrieval-dense".
+			if b.Len() > 0 && !lastUnderscore {
+				b.WriteByte('-')
+				lastUnderscore = true
+			}
+		case '_', '-', '&':
+			// A leading or trailing dash is noise, not part of the name.
+			if b.Len() == 0 && r == '-' {
+				continue
+			}
+			b.WriteRune(r)
+			lastUnderscore = false
 		default:
 			// Keep letters and digits, drop everything else (quotes, control
-			// characters, operator characters).
+			// characters, operators that would need quoting).
 			if tagNameRE.MatchString(string(r)) {
 				b.WriteRune(r)
 				lastUnderscore = false
+			} else if b.Len() > 0 && !lastUnderscore {
+				b.WriteByte('_')
+				lastUnderscore = true
 			}
 		}
 	}
-	return strings.Trim(b.String(), "_")
+	// A separator at the end is noise: "(x)" reads as "x", not "x-".
+	out := strings.TrimRight(strings.TrimSpace(b.String()), "-")
+	out = strings.TrimLeft(out, "-")
+	out = strings.TrimSpace(out)
+	// Collapse a reserved pair the sanitizer may have produced.
+	for _, pair := range []string{"&&", "||"} {
+		for strings.Contains(out, pair) {
+			out = strings.ReplaceAll(out, pair, string(pair[0]))
+		}
+	}
+	if !ValidTagName(out) {
+		return ""
+	}
+	return out
 }
 
 // CheckTagName returns ErrTagName-wrapped detail for a bad name.
@@ -168,9 +233,7 @@ func (g *GlobalConfig) UnmarshalJSON(b []byte) error {
 // MarshalJSON encodes the document, merging unknown keys.
 func (g GlobalConfig) MarshalJSON() ([]byte, error) {
 	m := map[string]any{}
-	for k, v := range g.Fields {
-		m[k] = v
-	}
+	maps.Copy(m, g.Fields)
 	if g.DefaultDir != "" {
 		m["default_dir"] = g.DefaultDir
 	} else {
@@ -397,4 +460,44 @@ func (s *Store) Inherit(g *GlobalConfig) {
 	if len(s.Config.TagTable) == 0 && len(g.TagTable) > 0 {
 		s.Config.TagTable = append([]Tag(nil), g.TagTable...)
 	}
+}
+
+// CriticalTagName reports whether a name cannot be written in a filter expression
+// without quoting: a space, a quote, a backslash, a "!" (which starts a negation),
+// or any "|" at all -- a lone one is a syntax error and a pair is OR. Such a name
+// does not stop the file from loading, but a query mentioning it has to be quoted,
+// so the picker marks it and saving is refused until it is fixed.
+//
+// A character that merely looks untidy -- a ".", a "/", a ":" -- is NOT critical:
+// it lexes as part of a bare name, so it is reported by --check and otherwise
+// left alone.
+func CriticalTagName(name string) bool {
+	for _, r := range name {
+		if unicode.IsSpace(r) || r == '"' || r == '\'' || r == '\\' || r == '!' ||
+			r == '|' || r == '(' || r == ')' {
+			return true
+		}
+	}
+	return strings.Contains(name, "&&")
+}
+
+// QuoteTagName renders a name so it can be pasted into a filter expression,
+// quoting it only when it would otherwise lex as something else.
+func QuoteTagName(name string) string {
+	if name == "" {
+		return `""`
+	}
+	if !CriticalTagName(name) {
+		return name
+	}
+	var b strings.Builder
+	b.WriteByte('"')
+	for _, r := range name {
+		if r == '"' || r == '\\' {
+			b.WriteByte('\\')
+		}
+		b.WriteRune(r)
+	}
+	b.WriteByte('"')
+	return b.String()
 }

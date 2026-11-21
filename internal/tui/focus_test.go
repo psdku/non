@@ -66,7 +66,7 @@ func TestMetaFormFocusClearsOnTab(t *testing.T) {
 	m := inlineModel(t, "kvcache")
 	m.width, m.height = 100, 30
 	m = key(m, "m")
-	for i := 0; i < 6; i++ {
+	for i := range 6 {
 		m = key(m, "tab")
 		if got := focusedRows(m); got > 1 {
 			t.Fatalf("after tab %d: %d rows focused", i, got)
@@ -85,7 +85,7 @@ func TestSettingsFormOnlyOneFieldIsFocused(t *testing.T) {
 	if m.settings.page != pageToolForm {
 		t.Fatalf("page = %v, want the tool form", m.settings.page)
 	}
-	for i := 0; i < 4; i++ {
+	for i := range 4 {
 		n := 0
 		for _, f := range m.settings.form {
 			if f.input.Focused() {
@@ -126,10 +126,11 @@ func TestTagSummary(t *testing.T) {
 // A paper with many tags must not squeeze its own name out of the row.
 func TestListRowCapsManyTags(t *testing.T) {
 	m := newTestModel(t, "a.pdf")
-	m.lib.Store.Set("a.pdf", &meta.Entry{
-		Title: "T",
-		Tags:  []string{"alpha", "beta", "gamma", "delta", "epsilon", "zeta"},
-	})
+	tags := []string{"alpha", "beta", "gamma", "delta", "epsilon", "zeta"}
+	for _, t := range tags {
+		m.lib.Store.Config.SetTag(-1, meta.Tag{Name: t})
+	}
+	m.lib.Store.Set("a.pdf", &meta.Entry{Title: "T", Tags: tags})
 	_ = m.lib.Rescan()
 	m.rebuild()
 
@@ -161,6 +162,9 @@ func TestListRowCapsManyTags(t *testing.T) {
 // The details pane keeps the full list: it is where you go to see everything.
 func TestDetailsPaneShowsAllTags(t *testing.T) {
 	m := newTestModel(t, "a.pdf")
+	for _, t := range []string{"alpha", "beta", "gamma", "delta"} {
+		m.lib.Store.Config.SetTag(-1, meta.Tag{Name: t})
+	}
 	m.lib.Store.Set("a.pdf", &meta.Entry{
 		Title: "T",
 		Tags:  []string{"alpha", "beta", "gamma", "delta"},

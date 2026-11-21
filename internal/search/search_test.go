@@ -94,7 +94,7 @@ func TestRankingPositions(t *testing.T) {
 func TestRankingIsDeterministic(t *testing.T) {
 	d := docs("b.pdf|same|", "a.pdf|same|")
 	first := OrderOf("same", d, nil, false)
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		if again := OrderOf("same", d, nil, false); len(again) != len(first) ||
 			again[0] != first[0] {
 			t.Fatalf("order changed: %v vs %v", first, again)

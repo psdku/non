@@ -130,31 +130,10 @@ func TestTagNameRules(t *testing.T) {
 			t.Errorf("%q should be valid", n)
 		}
 	}
-	invalid := []string{"", "kv-cache", "kv cache", "kv&cache", "a.b", `a"b`, "a/b", "a\nb"}
+	invalid := []string{"", "a.b", `a"b`, "a/b", "a\nb", "a&&b", "a||b", "a|b"}
 	for _, n := range invalid {
 		if ValidTagName(n) {
 			t.Errorf("%q should be invalid", n)
-		}
-	}
-}
-
-func TestSanitizeTagName(t *testing.T) {
-	cases := map[string]string{
-		"KV cache":  "KV_cache",
-		"kv-cache":  "kv_cache",
-		"  x  ":     "x",
-		"a.b.c":     "a_b_c",
-		"a&&b":      "ab",
-		`a"b`:       "ab",
-		"one  two":  "one_two",
-		"":          "",
-		"___":       "",
-		"tag/name":  "tag_name",
-		"tab\tname": "tab_name",
-	}
-	for in, want := range cases {
-		if got := SanitizeTagName(in); got != want {
-			t.Errorf("SanitizeTagName(%q) = %q, want %q", in, got, want)
 		}
 	}
 }
@@ -250,11 +229,12 @@ func TestMergeTagsOnlyAdds(t *testing.T) {
 		t.Errorf("table = %+v", c.TagTable)
 	}
 
-	// A hyphen survives as an underscore, which is a *different* tag: the
-	// import does not try to guess that the two were meant to be the same.
+	// A hyphen is a legal character now, so "kv-cache" is a *different* tag
+	// from "kvcache": the import does not try to guess that the two were meant
+	// to be the same.
 	c2 := &Config{TagTable: []Tag{{Name: "kvcache"}}}
 	res3 := c2.MergeTags([]ImportedTag{{Name: "kv-cache"}})
-	if len(res3.Added) != 1 || res3.Added[0] != "kv_cache" {
+	if len(res3.Added) != 1 || res3.Added[0] != "kv-cache" {
 		t.Errorf("hyphenated import = %+v", res3)
 	}
 

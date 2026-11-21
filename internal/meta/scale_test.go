@@ -33,7 +33,7 @@ const scaleAbstract = "The dominant sequence transduction models are based on co
 // fillStore builds a store with n realistic entries.
 func fillStore(n int) *Store {
 	s := New()
-	for i := 0; i < n; i++ {
+	for i := range n {
 		s.Set(fmt.Sprintf("1706.%05dv7.pdf", i), &Entry{
 			Title:    "Efficient Memory Management for Large Language Model Serving",
 			Author:   strings.Repeat("Author Name, ", 8),

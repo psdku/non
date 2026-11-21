@@ -191,14 +191,14 @@ func TestSettingsTagsAddRenameDelete(t *testing.T) {
 	}
 }
 
-// A tag name may only hold letters, digits and underscores.
+// A tag name may hold letters, digits, spaces and _ - & ( ) — not reserved punctuation.
 func TestSettingsTagNameRules(t *testing.T) {
 	m := newTestModel(t, "a.pdf")
 	m = key(m, "s")
 	m.settings.cursor = 4
 	m = key(m, "enter")
 	m = key(m, "a")
-	for _, bad := range []string{"kv-cache", "kv cache", "kv&cache", `kv"cache`, ""} {
+	for _, bad := range []string{"kv|cache", `kv"cache`, "kv&&cache", "kv!cache", ""} {
 		m.settings.form[0].input.SetValue(bad)
 		m = key(m, "ctrl+s")
 		if m.settings.page != pageTagForm {
@@ -208,13 +208,13 @@ func TestSettingsTagNameRules(t *testing.T) {
 			t.Errorf("%q: no error shown, status = %q", bad, m.settings.status)
 		}
 	}
-	// A good name goes through.
-	m.settings.form[0].input.SetValue("kv_cache")
+	// A good name goes through, including the characters people actually use.
+	m.settings.form[0].input.SetValue("KV-cache-paged")
 	m = key(m, "ctrl+s")
 	if m.settings.page != pageTags {
-		t.Fatalf("kv_cache was refused: %q", m.settings.status)
+		t.Fatalf("\"KV-cache-(paged)\" was refused: %q", m.settings.status)
 	}
-	if _, ok := m.lib.Store.Config.Tag("kv_cache"); !ok {
+	if _, ok := m.lib.Store.Config.Tag("KV-cache-paged"); !ok {
 		t.Error("tag not stored")
 	}
 }

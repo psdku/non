@@ -1,6 +1,7 @@
 package filter
 
 import (
+	"slices"
 	"strings"
 	"testing"
 )
@@ -86,7 +87,6 @@ func TestParseErrors(t *testing.T) {
 		{"LLM &&", `"&&" needs an expression on its right`},
 		{"|| LLM", `"||" needs an expression on its left`},
 		{"LLM |", `stray "|"`},
-		{"LLM &", `stray "&"`},
 		{"!", `"!" needs an expression after it`},
 		{"(LLM", `missing ")"`},
 		{"LLM)", `unexpected ")"`},
@@ -205,4 +205,68 @@ func FuzzParse(f *testing.F) {
 			t.Fatalf("%q rendered as %q does not parse: %v", s, n.String(), err)
 		}
 	})
+}
+
+// Tag names may now contain a space, a lone ampersand, a dash and parentheses;
+// a filter must handle them without quoting where possible.
+func TestFilterAcceptsRealTagNames(t *testing.T) {
+	cases := []struct {
+		expr string
+		has  []string
+		want bool
+	}{
+		{"R&D", []string{"R&D"}, true},
+		{"R&D", []string{"R"}, false},
+		{"attention-mechanisms", []string{"attention-mechanisms"}, true},
+		{`"KV cache"`, []string{"KV cache"}, true},
+		{`"retrieval (dense)"`, []string{"retrieval (dense)"}, true},
+		// A pair is still an operator, so the names are unambiguous.
+		{"a && b", []string{"a", "b"}, true},
+		{"a && b", []string{"a"}, false},
+	}
+	for _, c := range cases {
+		n, err := Parse(c.expr)
+		if err != nil {
+			t.Errorf("Parse(%q): %v", c.expr, err)
+			continue
+		}
+		if got := n.Eval(func(name string) bool {
+			return slices.Contains(c.has, name)
+		}); got != c.want {
+			t.Errorf("%q with %v = %v, want %v", c.expr, c.has, got, c.want)
+		}
+	}
+}
+
+// Rendering a name holding an allowed character must lex back to the same name.
+func TestFilterRoundTripsAllowedNames(t *testing.T) {
+	for _, name := range []string{"R&D", "KV cache", "attention-mechanisms", "retrieval (dense)"} {
+		n := Tag{Name: name}
+		rendered := n.String()
+		back, err := Parse(rendered)
+		if err != nil {
+			t.Errorf("%q rendered as %q, which does not parse: %v", name, rendered, err)
+			continue
+		}
+		got := Tags(back)
+		if len(got) != 1 || got[0] != name {
+			t.Errorf("%q rendered as %q and came back as %v", name, rendered, got)
+		}
+	}
+}
+
+// A stray ampersand is a name character, not a broken "&&".
+func TestFilterStrayAmpersandIsAName(t *testing.T) {
+	for _, expr := range []string{"R&D", "a&b"} {
+		if _, err := Parse(expr); err != nil {
+			t.Errorf("Parse(%q): %v", expr, err)
+		}
+	}
+	// A pair is still an operator that needs operands on both sides.
+	if _, err := Parse("&&"); err == nil {
+		t.Error("a bare && should be an error")
+	}
+	if _, err := Parse("a &&"); err == nil {
+		t.Error("a trailing && should be an error")
+	}
 }

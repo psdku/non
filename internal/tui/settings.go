@@ -614,14 +614,14 @@ func (m *Model) beginTagForm(idx int) tea.Cmd {
 		t := s.tags[idx]
 		s.tagOld = t.Name
 		s.form = []setField{
-			{label: "Name", input: newInput(t.Name, "e.g. kvcache"), help: "letters, digits and underscore only"},
+			{label: "Name", input: newInput(t.Name, "e.g. kvcache"), help: "letters, digits and _ - &"},
 			{label: "Description", input: newInput(t.Description, "when to use this tag"), help: "when to use this tag"},
 		}
 		return s.focusFormField()
 	} else {
 		s.tagOld = ""
 		s.form = []setField{
-			{label: "Name", input: newInput("", "e.g. kvcache"), help: "letters, digits and underscore only"},
+			{label: "Name", input: newInput("", "e.g. kvcache"), help: "letters, digits and _ - &"},
 			{label: "Description", input: newInput("", "when to use this tag"), help: "when to use this tag"},
 		}
 	}
@@ -667,9 +667,22 @@ func (m *Model) saveTagForm() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	c := &m.lib.Store.Config
+	// Case-insensitive: "llm" and "LlM" are the same tag, and the table already
+	// spells it once. Creating one is a no-op, so say so and go back to the list
+	// with the existing row selected, rather than leaving the user in a form that
+	// cannot be submitted.
 	if !strings.EqualFold(name, s.tagOld) {
-		if _, exists := c.Tag(name); exists {
-			s.setErr("a tag named " + name + " already exists")
+		if existing, exists := c.Tag(name); exists {
+			m.refreshTags()
+			for i, t := range s.tags {
+				if strings.EqualFold(t.Name, existing.Name) {
+					s.cursor = i
+				}
+			}
+			s.page = pageTags
+			s.form = nil
+			s.focused = -1
+			s.setErr("tag " + existing.Name + " already exists")
 			return m, nil
 		}
 	}

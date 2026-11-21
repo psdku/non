@@ -666,8 +666,11 @@ type editorDoneMsg struct {
 // applyEditor parses the edited markdown back into the store.
 func (m *Model) applyEditor(msg editorDoneMsg) (tea.Model, tea.Cmd) {
 	text, err := readFile(msg.path)
-	removeFile(msg.path)
+	// The temp file is removed only once its content has been accepted. On a
+	// rejection it is kept, and its path goes into the error, so the typing is
+	// not thrown away over one bad tag.
 	if msg.err != nil {
+		removeFile(msg.path)
 		m.setErr(fmt.Sprintf("editor: %v", msg.err))
 		return m, nil
 	}
@@ -677,13 +680,25 @@ func (m *Model) applyEditor(msg editorDoneMsg) (tea.Model, tea.Cmd) {
 	}
 	e, err := meta.ParseMarkdown(text)
 	if err != nil {
-		m.setErr(fmt.Sprintf("%s: %v (metadata unchanged)", msg.name, err))
+		// The text does not parse: keep the file so the typing is not lost, and
+		// say where it is.
+		m.setErr(fmt.Sprintf("%s: %v — metadata unchanged, your text is kept at %s",
+			msg.name, err, msg.path))
+		return m, nil
+	}
+	// A tag the table does not know would put the store in the state
+	// Store.Problems reports, so it is refused here too rather than written and
+	// complained about afterwards.
+	if bad := m.lib.Store.ValidateTags(e.Tags); len(bad) > 0 {
+		m.setErr(fmt.Sprintf("%s: not in the tag table: %s — metadata unchanged, your text is kept at %s",
+			msg.name, strings.Join(bad, ", "), msg.path))
 		return m, nil
 	}
 	if err := m.lib.SaveMeta(msg.name, e); err != nil {
 		m.setErr(err.Error())
 		return m, nil
 	}
+	removeFile(msg.path)
 	m.setStatus("metadata saved for " + msg.name)
 	m.reloadNow()
 	return m, m.ensureSelectedMeta()

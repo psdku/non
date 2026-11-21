@@ -130,3 +130,125 @@ func TestPrintQueryOutputIsNamesOnly(t *testing.T) {
 		}
 	}
 }
+
+// --check reports problems and exits non-zero, without writing anything.
+func TestCheckReportsUnknownTags(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.pdf"), []byte("%PDF-1.4\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	raw := `{"version":1,"entries":{"a.pdf":{"title":"A","tags":["LLM","typo"]}},
+	         "config":{"tags":[{"name":"LLM"}]}}`
+	path := filepath.Join(dir, meta.StoreFile)
+	if err := os.WriteFile(path, []byte(raw), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	lib, err := app.OpenDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Capture stdout so the report can be checked.
+	stdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+	checkErr := runCheck(lib)
+	w.Close()
+	os.Stdout = stdout
+	var buf bytes.Buffer
+	_, _ = io.Copy(&buf, r)
+
+	if checkErr == nil {
+		t.Error("--check accepted a store with an unknown tag")
+	}
+	out := buf.String()
+	if !strings.Contains(out, "typo") || !strings.Contains(out, "a.pdf") {
+		t.Errorf("report does not name the problem:\n%s", out)
+	}
+	// Nothing was written.
+	back, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(back) != raw {
+		t.Errorf("--check modified the store:\n%s", back)
+	}
+}
+
+func TestCheckCleanStoreSucceeds(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.pdf"), []byte("%PDF-1.4\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	lib, err := app.OpenDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runCheck(lib); err != nil {
+		t.Errorf("a clean store was reported as broken: %v", err)
+	}
+}
+
+// An untidy-but-known name is reported by --check but does not fail: it is
+// displayable and queryable, so a hook must not break on it.
+func TestCheckToleratesUntidyName(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.pdf"), []byte("%PDF-1.4\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	raw := `{"version":1,"entries":{"a.pdf":{"title":"A","tags":["weird.name"]}},
+	         "config":{"tags":[{"name":"weird.name"}]}}`
+	if err := os.WriteFile(filepath.Join(dir, meta.StoreFile), []byte(raw), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	lib, err := app.OpenDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+	checkErr := runCheck(lib)
+	w.Close()
+	os.Stdout = stdout
+	var buf bytes.Buffer
+	_, _ = io.Copy(&buf, r)
+
+	if checkErr != nil {
+		t.Errorf("--check failed on a tolerated name: %v", checkErr)
+	}
+	if !strings.Contains(buf.String(), "tolerated") {
+		t.Errorf("the problem was not reported:\n%s", buf.String())
+	}
+}
+
+// A name that would need quoting in every query does fail --check.
+func TestCheckFailsOnCriticalName(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.pdf"), []byte("%PDF-1.4\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	raw := `{"version":1,"entries":{"a.pdf":{"title":"A","tags":["KV cache"]}},
+	         "config":{"tags":[{"name":"KV cache"}]}}`
+	if err := os.WriteFile(filepath.Join(dir, meta.StoreFile), []byte(raw), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	lib, err := app.OpenDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+	checkErr := runCheck(lib)
+	w.Close()
+	os.Stdout = stdout
+	var buf bytes.Buffer
+	_, _ = io.Copy(&buf, r)
+
+	if checkErr == nil {
+		t.Error("--check accepted a name that cannot be queried")
+	}
+	if !strings.Contains(buf.String(), "cannot be used in a query") {
+		t.Errorf("report:\n%s", buf.String())
+	}
+}
